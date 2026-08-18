@@ -1,0 +1,386 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Flask + Three.js Penalty Shootout</title>
+
+    <!-- Bootstrap CSS (CDN) -->
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet">
+</head>
+<body class="bg-light">
+
+    <!-- Navbar -->
+    <nav class="navbar navbar-dark bg-dark mb-4">
+        <div class="container">
+            <span class="navbar-brand mb-0 h1">⚽ Penalty Shootout</span>
+        </div>
+    </nav>
+
+    <div class="container">
+
+        <!-- Status bar -->
+        <div class="row mb-3">
+            <div class="col-12">
+                <div class="card shadow-sm">
+                    <div class="card-body d-flex flex-wrap justify-content-between align-items-center gap-2">
+                        <div>
+                            <span class="badge bg-primary fs-6 me-2">Shot: <span id="shot-num">1</span> / 5</span>
+                            <span class="badge bg-success fs-6 me-2">Score: <span id="score">0</span></span>
+                        </div>
+                        <div>
+                            <span id="status-msg" class="fw-bold fs-5"></span>
+                        </div>
+                        <button id="reset-btn" class="btn btn-outline-danger btn-sm">Restart</button>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- 3D Game Canvas -->
+        <div class="row mb-3">
+            <div class="col-12">
+                <div class="card shadow-sm">
+                    <div class="card-header bg-primary text-white">
+                        Pick a target zone, then take your shot
+                    </div>
+                    <div class="card-body p-0">
+                        <div id="three-canvas" class="w-100" style="height: 550px;"></div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Aim controls -->
+        <div class="row mb-5">
+            <div class="col-12">
+                <div class="card shadow-sm">
+                    <div class="card-body">
+                        <p class="fw-semibold mb-2">Aim:</p>
+                        <div class="d-grid gap-2 mb-3" style="grid-template-columns: repeat(3, 1fr); display: grid;">
+                            <button class="btn btn-outline-dark aim-btn" data-zone="top-left">↖ Top Left</button>
+                            <button class="btn btn-outline-dark aim-btn" data-zone="top-center">↑ Top Center</button>
+                            <button class="btn btn-outline-dark aim-btn" data-zone="top-right">↗ Top Right</button>
+                            <button class="btn btn-outline-dark aim-btn" data-zone="bottom-left">↙ Bottom Left</button>
+                            <button class="btn btn-outline-dark aim-btn" data-zone="bottom-center">↓ Bottom Center</button>
+                            <button class="btn btn-outline-dark aim-btn" data-zone="bottom-right">↘ Bottom Right</button>
+                        </div>
+                        <button id="shoot-btn" class="btn btn-success btn-lg w-100" disabled>Take Shot</button>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+    </div>
+
+    <!-- Result Modal -->
+    <div class="modal fade" id="finalModal" tabindex="-1" aria-hidden="true">
+        <div class="modal-dialog modal-dialog-centered">
+            <div class="modal-content">
+                <div class="modal-header bg-success text-white">
+                    <h5 class="modal-title">Shootout Complete!</h5>
+                </div>
+                <div class="modal-body">
+                    You scored <span id="final-score" class="fw-bold"></span> out of 5 penalties.
+                </div>
+                <div class="modal-footer">
+                    <button type="button" class="btn btn-primary" id="play-again-btn">Play Again</button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Bootstrap JS Bundle -->
+    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
+
+    <!-- Three.js (CDN) -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+
+    <!-- ===================== Internal Game JS ===================== -->
+    <script>
+    (function () {
+        const container = document.getElementById('three-canvas');
+        const shotNumEl = document.getElementById('shot-num');
+        const scoreEl = document.getElementById('score');
+        const statusEl = document.getElementById('status-msg');
+        const resetBtn = document.getElementById('reset-btn');
+        const shootBtn = document.getElementById('shoot-btn');
+        const aimBtns = document.querySelectorAll('.aim-btn');
+        const finalModalEl = document.getElementById('finalModal');
+        const finalModal = new bootstrap.Modal(finalModalEl);
+        const finalScoreEl = document.getElementById('final-score');
+        const playAgainBtn = document.getElementById('play-again-btn');
+
+        // ---- Zone target positions (goal mouth coordinates) ----
+        const ZONES = {
+            'top-left':      { x: -1.9, y: 2.0 },
+            'top-center':    { x:  0,   y: 2.1 },
+            'top-right':     { x:  1.9, y: 2.0 },
+            'bottom-left':   { x: -1.9, y: 0.6 },
+            'bottom-center': { x:  0,   y: 0.5 },
+            'bottom-right':  { x:  1.9, y: 0.6 }
+        };
+        const ZONE_KEYS = Object.keys(ZONES);
+        const GOAL_Z = -3.2;       // goal line depth
+        const SPOT_Z = 6;          // penalty spot depth
+        const BALL_START = { x: 0, y: 0.25, z: SPOT_Z };
+
+        // ---- State ----
+        let scene, camera, renderer;
+        let ball, keeperGroup;
+        let selectedZone = null;
+        let shotsTaken = 0;
+        let score = 0;
+        let animating = false;
+
+        function init() {
+            scene = new THREE.Scene();
+            scene.background = new THREE.Color(0x9fd8ff);
+
+            camera = new THREE.PerspectiveCamera(
+                55, container.clientWidth / container.clientHeight, 0.1, 100
+            );
+            camera.position.set(0, 2.2, 8.5);
+            camera.lookAt(0, 1.2, GOAL_Z);
+
+            renderer = new THREE.WebGLRenderer({ antialias: true });
+            renderer.setSize(container.clientWidth, container.clientHeight);
+            container.innerHTML = "";
+            container.appendChild(renderer.domElement);
+
+            // Lights
+            scene.add(new THREE.AmbientLight(0xffffff, 0.75));
+            const dirLight = new THREE.DirectionalLight(0xffffff, 0.7);
+            dirLight.position.set(5, 10, 5);
+            scene.add(dirLight);
+
+            // Pitch
+            const pitchGeo = new THREE.PlaneGeometry(30, 30);
+            const pitchMat = new THREE.MeshStandardMaterial({ color: 0x3c9e3c });
+            const pitch = new THREE.Mesh(pitchGeo, pitchMat);
+            pitch.rotation.x = -Math.PI / 2;
+            pitch.position.y = -0.01;
+            scene.add(pitch);
+
+            buildGoal();
+            buildKeeper();
+            buildBall();
+
+            window.addEventListener('resize', onResize);
+            animate();
+        }
+
+        function onResize() {
+            camera.aspect = container.clientWidth / container.clientHeight;
+            camera.updateProjectionMatrix();
+            renderer.setSize(container.clientWidth, container.clientHeight);
+        }
+
+        function buildGoal() {
+            const postMat = new THREE.MeshStandardMaterial({ color: 0xffffff });
+            const postGeo = new THREE.CylinderGeometry(0.08, 0.08, 2.6, 12);
+
+            const leftPost = new THREE.Mesh(postGeo, postMat);
+            leftPost.position.set(-2.6, 1.3, GOAL_Z);
+            scene.add(leftPost);
+
+            const rightPost = new THREE.Mesh(postGeo, postMat);
+            rightPost.position.set(2.6, 1.3, GOAL_Z);
+            scene.add(rightPost);
+
+            const crossbarGeo = new THREE.CylinderGeometry(0.08, 0.08, 5.3, 12);
+            const crossbar = new THREE.Mesh(crossbarGeo, postMat);
+            crossbar.rotation.z = Math.PI / 2;
+            crossbar.position.set(0, 2.58, GOAL_Z);
+            scene.add(crossbar);
+
+            // Simple net (grid of thin lines)
+            const netMat = new THREE.LineBasicMaterial({ color: 0xdddddd, transparent: true, opacity: 0.6 });
+            const netPoints = [];
+            for (let x = -2.5; x <= 2.5; x += 0.5) {
+                netPoints.push(new THREE.Vector3(x, 0.05, GOAL_Z - 0.6));
+                netPoints.push(new THREE.Vector3(x, 2.55, GOAL_Z - 0.6));
+            }
+            for (let y = 0.05; y <= 2.55; y += 0.4) {
+                netPoints.push(new THREE.Vector3(-2.5, y, GOAL_Z - 0.6));
+                netPoints.push(new THREE.Vector3(2.5, y, GOAL_Z - 0.6));
+            }
+            const netGeo = new THREE.BufferGeometry().setFromPoints(netPoints);
+            const net = new THREE.LineSegments(netGeo, netMat);
+            scene.add(net);
+        }
+
+        function buildKeeper() {
+            keeperGroup = new THREE.Group();
+
+            const bodyMat = new THREE.MeshStandardMaterial({ color: 0xffcc00 });
+            const torso = new THREE.Mesh(new THREE.BoxGeometry(0.5, 0.8, 0.3), bodyMat);
+            torso.position.y = 0.7;
+            keeperGroup.add(torso);
+
+            const headMat = new THREE.MeshStandardMaterial({ color: 0xf1c27d });
+            const head = new THREE.Mesh(new THREE.SphereGeometry(0.18, 16, 16), headMat);
+            head.position.y = 1.25;
+            keeperGroup.add(head);
+
+            const armGeo = new THREE.BoxGeometry(0.18, 0.6, 0.18);
+            const leftArm = new THREE.Mesh(armGeo, bodyMat);
+            leftArm.position.set(-0.35, 0.75, 0);
+            keeperGroup.add(leftArm);
+            const rightArm = new THREE.Mesh(armGeo, bodyMat);
+            rightArm.position.set(0.35, 0.75, 0);
+            keeperGroup.add(rightArm);
+
+            const legGeo = new THREE.BoxGeometry(0.18, 0.6, 0.18);
+            const legMat = new THREE.MeshStandardMaterial({ color: 0x222222 });
+            const leftLeg = new THREE.Mesh(legGeo, legMat);
+            leftLeg.position.set(-0.15, 0.15, 0);
+            keeperGroup.add(leftLeg);
+            const rightLeg = new THREE.Mesh(legGeo, legMat);
+            rightLeg.position.set(0.15, 0.15, 0);
+            keeperGroup.add(rightLeg);
+
+            keeperGroup.position.set(0, 0, GOAL_Z + 0.3);
+            scene.add(keeperGroup);
+        }
+
+        function buildBall() {
+            const geo = new THREE.SphereGeometry(0.22, 20, 20);
+            const mat = new THREE.MeshStandardMaterial({ color: 0xffffff });
+            ball = new THREE.Mesh(geo, mat);
+            resetBallPosition();
+            scene.add(ball);
+        }
+
+        function resetBallPosition() {
+            ball.position.set(BALL_START.x, BALL_START.y, BALL_START.z);
+        }
+
+        function resetKeeperPosition() {
+            keeperGroup.position.set(0, 0, GOAL_Z + 0.3);
+            keeperGroup.rotation.z = 0;
+        }
+
+        // ---- Aim button handling ----
+        aimBtns.forEach(btn => {
+            btn.addEventListener('click', () => {
+                if (animating) return;
+                aimBtns.forEach(b => b.classList.remove('btn-dark', 'text-white'));
+                aimBtns.forEach(b => b.classList.add('btn-outline-dark'));
+                btn.classList.remove('btn-outline-dark');
+                btn.classList.add('btn-dark', 'text-white');
+                selectedZone = btn.dataset.zone;
+                shootBtn.disabled = false;
+            });
+        });
+
+        shootBtn.addEventListener('click', takeShot);
+        resetBtn.addEventListener('click', restartGame);
+        playAgainBtn.addEventListener('click', () => {
+            finalModal.hide();
+            restartGame();
+        });
+
+        function takeShot() {
+            if (!selectedZone || animating) return;
+            animating = true;
+            shootBtn.disabled = true;
+            aimBtns.forEach(b => b.disabled = true);
+            statusEl.textContent = "";
+
+            const target = ZONES[selectedZone];
+            const keeperZone = ZONE_KEYS[Math.floor(Math.random() * ZONE_KEYS.length)];
+            const keeperTarget = ZONES[keeperZone];
+            const saved = keeperZone === selectedZone;
+
+            const duration = 900; // ms
+            const startTime = performance.now();
+            const ballStart = { x: BALL_START.x, y: BALL_START.y, z: BALL_START.z };
+            const keeperStartX = 0;
+
+            function step(now) {
+                const t = Math.min((now - startTime) / duration, 1);
+
+                // Ball trajectory: lerp x/z, arc on y
+                ball.position.x = ballStart.x + (target.x - ballStart.x) * t;
+                ball.position.z = ballStart.z + (GOAL_Z - ballStart.z) * t;
+                const arc = Math.sin(t * Math.PI) * 1.2; // hump
+                ball.position.y = ballStart.y + (target.y - ballStart.y) * t + arc;
+                ball.rotation.x += 0.3;
+
+                // Keeper dive toward keeperTarget.x, slight lean/fall
+                keeperGroup.position.x = keeperStartX + (keeperTarget.x * 0.85 - keeperStartX) * t;
+                keeperGroup.position.y = Math.sin(t * Math.PI * 0.5) * 0.1;
+                keeperGroup.rotation.z = (keeperTarget.x > 0 ? -1 : keeperTarget.x < 0 ? 1 : 0) * t * 0.9;
+
+                if (t < 1) {
+                    requestAnimationFrame(step);
+                } else {
+                    finishShot(saved);
+                }
+            }
+            requestAnimationFrame(step);
+        }
+
+        function finishShot(saved) {
+            shotsTaken++;
+            if (saved) {
+                statusEl.textContent = "SAVED! 🧤";
+                statusEl.className = "fw-bold fs-5 text-danger";
+            } else {
+                score++;
+                statusEl.textContent = "GOAL! ⚽";
+                statusEl.className = "fw-bold fs-5 text-success";
+            }
+            scoreEl.textContent = score;
+
+            setTimeout(() => {
+                if (shotsTaken >= 5) {
+                    finalScoreEl.textContent = `${score} / 5`;
+                    finalModal.show();
+                } else {
+                    shotNumEl.textContent = shotsTaken + 1;
+                    resetBallPosition();
+                    resetKeeperPosition();
+                    selectedZone = null;
+                    aimBtns.forEach(b => {
+                        b.disabled = false;
+                        b.classList.remove('btn-dark', 'text-white');
+                        b.classList.add('btn-outline-dark');
+                    });
+                    shootBtn.disabled = true;
+                    statusEl.textContent = "";
+                    animating = false;
+                }
+            }, 1200);
+        }
+
+        function restartGame() {
+            shotsTaken = 0;
+            score = 0;
+            selectedZone = null;
+            animating = false;
+            shotNumEl.textContent = 1;
+            scoreEl.textContent = 0;
+            statusEl.textContent = "";
+            resetBallPosition();
+            resetKeeperPosition();
+            aimBtns.forEach(b => {
+                b.disabled = false;
+                b.classList.remove('btn-dark', 'text-white');
+                b.classList.add('btn-outline-dark');
+            });
+            shootBtn.disabled = true;
+        }
+
+        function animate() {
+            requestAnimationFrame(animate);
+            renderer.render(scene, camera);
+        }
+
+        init();
+    })();
+    </script>
+
+</body>
+</html>
